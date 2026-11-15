@@ -5,6 +5,8 @@
 // navigate, and the spawn points.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
+import { createSky } from './sky.js';
+import { createGroundTexture, createSiteLetter } from './ground.js';
 
 const WALL_H = 5.2;
 
@@ -26,6 +28,10 @@ export const createWorld = (scene) => {
   const rustMat = new THREE.MeshStandardMaterial({ color: 0x9a4a28, roughness: 0.85, metalness: 0.25 });
   const tealMat = new THREE.MeshStandardMaterial({ color: 0x2e6f66, roughness: 0.85, metalness: 0.25 });
   const siloMat = new THREE.MeshStandardMaterial({ color: 0x6d7680, roughness: 0.6, metalness: 0.55 });
+  // The yard floor is painted asphalt, not a flat slab: speckle, stains,
+  // joints and cracks give the ground something for the eye to hold.
+  materials.ground.map = createGroundTexture();
+  materials.ground.needsUpdate = true;
 
   const colliders = [];
   const shootables = [];
@@ -112,6 +118,9 @@ export const createWorld = (scene) => {
     else flatRing(p[1], p[2], 4.2, 0x3fb8a6);
   });
 
+  // The sky over the yard: gradient dome, stars, low sun in the west.
+  createSky(scene);
+
   // ---- Distant silhouettes outside the walls, for depth at dusk ----
   const ghost = new THREE.MeshStandardMaterial({ color: 0x1c2129, roughness: 1, metalness: 0 });
   const ghostBox = (w, h, d, x, y, z) => {
@@ -130,9 +139,9 @@ export const createWorld = (scene) => {
 
   // ---- Light: low amber sun from the west, cool fill, dusk sky ----
   scene.fog = new THREE.Fog(new THREE.Color(PALETTE.canvas), 26, 78);
-  const sky = new THREE.HemisphereLight(new THREE.Color(0x8a97a8), new THREE.Color(0x1a1512), 1.35);
+  const sky = new THREE.HemisphereLight(new THREE.Color(0x8a97a8), new THREE.Color(0x1a1512), 1.5);
   scene.add(sky);
-  const sun = new THREE.DirectionalLight(new THREE.Color(0xffb45e), 2.8);
+  const sun = new THREE.DirectionalLight(new THREE.Color(0xffb45e), 3.0);
   sun.position.set(-24, 16, 10);
   sun.target.position.set(4, 0, -4);
   sun.castShadow = true;
@@ -148,6 +157,12 @@ export const createWorld = (scene) => {
   const sites = [['A', 'Silos', -19], ['B', 'Depot', 19]].map(([id, name, x]) => ({
     id, name, center: new THREE.Vector3(x, 0, -9.5), radius: 4.2,
   }));
+  // Each site's letter, painted faded on the ground inside its ring.
+  sites.forEach((site) => {
+    const decal = createSiteLetter(site.id);
+    decal.position.set(site.center.x, 0.04, site.center.z);
+    group.add(decal);
+  });
   const viperSpawns = [[-4, 16], [0, 17], [4, 16], [-8, 14], [8, 14]].map(([x, z]) => new THREE.Vector3(x, 0, z));
   const spawns = {
     vipers: viperSpawns,

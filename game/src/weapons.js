@@ -25,43 +25,65 @@ export const WEAPONS = Object.fromEntries(WEAPON_ROWS.map((row) => {
 
 export const GRENADE = Object.fromEntries([['name', 'M-67 Frag'], ['price', 400], ['damage', 95], ['radius', 6.5], ['fuse', 1.4]]);
 
-// View-model parts per gun: [w, h, d, x, y, z, material] — body, grip or accent.
+// View-model parts per gun: [w, h, d, x, y, z, material, tiltX] — receiver,
+// barrel, handguard, stock, magazine, grip and sights, so each gun reads as
+// the weapon it is instead of a pale slab. Materials are dark gunmetal with
+// one amber accent; the sights are bright so they catch the eye.
 const VIEW_PARTS = {
   pistol: [
-    [0.07, 0.09, 0.24, 0, 0, -0.1, 'body'],
-    [0.06, 0.12, 0.08, 0, -0.09, 0.02, 'grip'],
+    [0.06, 0.07, 0.22, 0, 0.01, -0.08, 'body', 0],
+    [0.055, 0.06, 0.2, 0, -0.03, -0.06, 'grip', 0],
+    [0.05, 0.11, 0.07, 0, -0.1, 0.04, 'grip', 0.25],
+    [0.012, 0.03, 0.012, 0, 0.06, -0.18, 'sight', 0],
+    [0.062, 0.012, 0.08, 0, 0.045, -0.1, 'accent', 0],
   ],
   smg: [
-    [0.08, 0.09, 0.34, 0, 0, -0.12, 'body'],
-    [0.05, 0.16, 0.06, 0, -0.1, -0.02, 'grip'],
-    [0.04, 0.04, 0.2, 0, 0.02, -0.34, 'accent'],
+    [0.08, 0.09, 0.3, 0, 0, -0.1, 'body', 0],
+    [0.03, 0.03, 0.22, 0, 0.01, -0.34, 'body', 0],
+    [0.07, 0.08, 0.2, 0, 0, -0.26, 'grip', 0],
+    [0.06, 0.08, 0.14, 0, -0.01, 0.12, 'grip', 0],
+    [0.04, 0.18, 0.06, 0, -0.12, -0.06, 'mag', 0],
+    [0.012, 0.04, 0.012, 0, 0.06, -0.4, 'sight', 0],
+    [0.082, 0.014, 0.12, 0, 0.02, -0.14, 'accent', 0],
   ],
   dmr: [
-    [0.07, 0.08, 0.62, 0, 0, -0.2, 'body'],
-    [0.05, 0.06, 0.14, 0, 0.07, -0.12, 'accent'],
-    [0.06, 0.1, 0.16, 0, -0.08, 0.08, 'grip'],
+    [0.07, 0.09, 0.34, 0, 0, -0.08, 'body', 0],
+    [0.03, 0.03, 0.42, 0, 0.01, -0.44, 'body', 0],
+    [0.05, 0.05, 0.16, 0, 0.075, -0.1, 'grip', 0],
+    [0.045, 0.045, 0.01, 0, 0.075, -0.19, 'sight', 0],
+    [0.06, 0.09, 0.22, 0, -0.01, 0.16, 'grip', 0],
+    [0.045, 0.12, 0.08, 0, -0.1, -0.02, 'mag', 0.12],
+    [0.072, 0.012, 0.1, 0, 0.03, -0.12, 'accent', 0],
   ],
   rifle: [
-    [0.09, 0.1, 0.42, 0, 0, -0.12, 'body'],
-    [0.045, 0.045, 0.4, 0, 0.025, -0.5, 'grip'],
-    [0.075, 0.08, 0.22, 0, -0.02, 0.18, 'grip'],
+    [0.09, 0.11, 0.3, 0, 0, -0.05, 'body', 0],
+    [0.035, 0.035, 0.34, 0, 0.01, -0.36, 'body', 0],
+    [0.08, 0.09, 0.26, 0, 0, -0.28, 'grip', 0],
+    [0.07, 0.1, 0.2, 0, -0.01, 0.2, 'grip', 0],
+    [0.05, 0.16, 0.09, 0, -0.11, -0.02, 'mag', 0.15],
+    [0.05, 0.12, 0.07, 0, -0.1, 0.1, 'grip', 0.35],
+    [0.015, 0.05, 0.015, 0, 0.075, -0.42, 'sight', 0],
+    [0.04, 0.025, 0.015, 0, 0.062, -0.02, 'sight', 0],
+    [0.092, 0.015, 0.1, 0, 0.03, -0.12, 'accent', 0],
   ],
 };
 
 const buildViewModel = (kind) => {
-  const grip = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.hairline), roughness: 0.7, metalness: 0.2 });
-  const body = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.ink), roughness: 0.5, metalness: 0.35 });
+  const body = new THREE.MeshStandardMaterial({ color: 0x3d434c, roughness: 0.45, metalness: 0.6 });
+  const grip = new THREE.MeshStandardMaterial({ color: 0x23272d, roughness: 0.6, metalness: 0.4 });
+  const mag = new THREE.MeshStandardMaterial({ color: 0x2e333a, roughness: 0.5, metalness: 0.55 });
   const accent = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.accent), roughness: 0.5, metalness: 0.2 });
-  const mats = { body, grip, accent };
+  const sight = new THREE.MeshBasicMaterial({ color: new THREE.Color(PALETTE.accent) });
+  const mats = { body, grip, mag, accent, sight };
   const model = new THREE.Group();
-  const add = (w, h, d, x, y, z, mat) => {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  (VIEW_PARTS[kind] || VIEW_PARTS.rifle).forEach(([w, h, d, x, y, z, m, tilt]) => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mats[m]);
     mesh.position.set(x, y, z);
+    if (tilt) mesh.rotation.x = tilt;
     model.add(mesh);
-    return mesh;
-  };
-  (VIEW_PARTS[kind] || VIEW_PARTS.rifle).forEach(([w, h, d, x, y, z, m]) => add(w, h, d, x, y, z, mats[m]));
+  });
   model.position.set(0.26, -0.23, -0.5);
+  model.rotation.y = -0.06;
   return model;
 };
 
