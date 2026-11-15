@@ -7,20 +7,19 @@ import { GRENADE } from './weapons.js';
 const MAX_GRENADES = 2;
 const GRAVITY = 14;
 
-export function createGrenades(scene, world, fx, audio) {
-  const items = [];
-  for (let i = 0; i < MAX_GRENADES; i += 1) {
+export const createGrenades = (scene, world, fx, audio) => {
+  const items = Array.from({ length: MAX_GRENADES }, () => {
     const mesh = new THREE.Mesh(
       new THREE.SphereGeometry(0.09, 10, 8),
       new THREE.MeshStandardMaterial({ color: 0x3a4149, roughness: 0.5, metalness: 0.6 }),
     );
     mesh.visible = false;
     scene.add(mesh);
-    items.push({ mesh, active: false, position: new THREE.Vector3(), velocity: new THREE.Vector3(), fuse: 0, bounced: false });
-  }
+    return { mesh, active: false, position: new THREE.Vector3(), velocity: new THREE.Vector3(), fuse: 0, bounced: false };
+  });
   let index = 0;
 
-  function throwGrenade(origin, direction) {
+  const throwGrenade = (origin, direction) => {
     const g = items[index];
     index = (index + 1) % MAX_GRENADES;
     g.active = true;
@@ -32,51 +31,57 @@ export function createGrenades(scene, world, fx, audio) {
     g.mesh.visible = true;
     g.mesh.position.copy(origin);
     audio.grenadePin();
-  }
-
-  function step(dt, ctx) {
-    for (const g of items) {
-      if (!g.active) continue;
-      g.fuse -= dt;
-      g.velocity.y -= GRAVITY * dt;
-      const before = g.position.clone();
-      g.position.addScaledVector(g.velocity, dt);
-      // Bounce off the world: test the new position against colliders, reflect cheaply.
-      const hit = world.overlaps(g.position.x, g.position.y, g.position.z, 0.09, 0.18, 0);
-      if (hit) {
-        g.position.copy(before);
-        if (Math.abs(g.velocity.y) > 1.5) g.velocity.y = -g.velocity.y * 0.42;
-        else g.velocity.y = 0;
-        g.velocity.x *= 0.6;
-        g.velocity.z *= 0.6;
-        g.bounced = true;
-      }
-      if (g.position.y < 0.09) {
-        g.position.y = 0.09;
-        g.velocity.y = Math.abs(g.velocity.y) > 1 ? -g.velocity.y * 0.4 : 0;
-        g.velocity.x *= 0.7;
-        g.velocity.z *= 0.7;
-        g.bounced = true;
-      }
-      g.mesh.position.copy(g.position);
-      if (g.fuse <= 0) {
-        g.active = false;
-        g.mesh.visible = false;
-        fx.explosion(g.position);
-        audio.explode();
-        ctx.onExplode(g.position, GRENADE.radius, GRENADE.damage);
-      }
-    }
-  }
-
-  return {
-    throwGrenade,
-    step,
-    reset() {
-      for (const g of items) {
-        g.active = false;
-        g.mesh.visible = false;
-      }
-    },
   };
-}
+
+  const bounceWall = (g) => {
+    if (Math.abs(g.velocity.y) > 1.5) g.velocity.y = -g.velocity.y * 0.42;
+    else g.velocity.y = 0;
+    g.velocity.x *= 0.6;
+    g.velocity.z *= 0.6;
+    g.bounced = true;
+  };
+
+  const bounceFloor = (g) => {
+    g.position.y = 0.09;
+    if (Math.abs(g.velocity.y) > 1) g.velocity.y = -g.velocity.y * 0.4;
+    else g.velocity.y = 0;
+    g.velocity.x *= 0.7;
+    g.velocity.z *= 0.7;
+    g.bounced = true;
+  };
+
+  const stepGrenade = (g, dt, ctx) => {
+    if (g.active === false) return;
+    g.fuse -= dt;
+    g.velocity.y -= GRAVITY * dt;
+    const before = g.position.clone();
+    g.position.addScaledVector(g.velocity, dt);
+    // Bounce off the world: test the new position against colliders, reflect cheaply.
+    const hit = world.overlaps(g.position.x, g.position.y, g.position.z, 0.09, 0.18, 0);
+    if (hit) {
+      g.position.copy(before);
+      bounceWall(g);
+    }
+    if (g.position.y < 0.09) bounceFloor(g);
+    g.mesh.position.copy(g.position);
+    if (g.fuse > 0) return;
+    g.active = false;
+    g.mesh.visible = false;
+    fx.explosion(g.position);
+    audio.explode();
+    ctx.onExplode(g.position, GRENADE.radius, GRENADE.damage);
+  };
+
+  const step = (dt, ctx) => {
+    items.forEach((g) => stepGrenade(g, dt, ctx));
+  };
+
+  const reset = () => {
+    items.forEach((g) => {
+      g.active = false;
+      g.mesh.visible = false;
+    });
+  };
+
+  return { throwGrenade, step, reset };
+};
