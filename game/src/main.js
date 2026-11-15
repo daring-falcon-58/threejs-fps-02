@@ -1,39 +1,52 @@
-// SABLE LINE: boot and the one loop. A fixed 60 Hz simulation feeds a render at the
-// display's rate. The player leads four Viper bots against five Jackal bots in round
-// based tactical play: plant the spike at A or B, or eliminate the other team.
-// ?shot=start|play|site|end with &seed=N stages a deterministic frame for a capture,
-// renders it twice, then freezes it and sets window.__shotReady.
+// SABLE LINE boot: one fixed-step simulation, one render loop. The player leads
+// four Viper bots against five Jackal bots in round-based tactical play: plant the
+// spike at A or B, or eliminate the other team. ?shot=start|play|site|end with
+// &seed=N stages a deterministic frame for a capture, renders it twice, then
+// freezes it and sets window.__shotReady.
 import * as THREE from 'three';
-import { PALETTE } from './palette.js';
 import { mulberry32 } from './rng.js';
-import { createWorld } from './world.js';
+import { PALETTE } from './palette.js';
 import { createInput } from './input.js';
+import { createWorld } from './world.js';
 import { createPlayer } from './player.js';
 import { createWeaponSystem, WEAPONS, GRENADE } from './weapons.js';
-import { createBots } from './bots.js';
 import { createEffects } from './effects.js';
+import { createBots } from './bots.js';
 import { createRounds, BUY_ITEMS, PLANT_TIME } from './rounds.js';
 import { createGrenades } from './grenades.js';
 import { createAudio } from './audio.js';
 import { createHud } from './hud.js';
 
-const FIXED_STEP = 1 / 60;
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seed = Number.parseInt(params.get('seed') ?? '1', 10) || 1;
-const random = mulberry32(shot ? seed : (Date.now() % 2147483647));
+const STEP = 1 / 60;
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-document.getElementById('game').appendChild(renderer.domElement);
+// Launch parameters: a staged capture (?shot=...&seed=N) or a live match.
+const readLaunch = () => {
+  const query = new URLSearchParams(location.search);
+  const staged = query.get('shot');
+  const seed = Number.parseInt(query.get('seed') ?? '1', 10) || 1;
+  return { staged, random: mulberry32(staged ? seed : (Date.now() % 2147483647)) };
+};
+const { staged, random } = readLaunch();
+
+const makeRenderer = () => {
+  const r = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  r.setPixelRatio(Math.min(devicePixelRatio, 2));
+  r.setSize(innerWidth, innerHeight);
+  r.shadowMap.enabled = true;
+  r.shadowMap.type = THREE.PCFSoftShadowMap;
+  document.getElementById('game').appendChild(r.domElement);
+  return r;
+};
+const renderer = makeRenderer();
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(PALETTE.canvas);
-const camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.05, 160);
-scene.add(camera);
+const makeCamera = () => {
+  const cam = new THREE.PerspectiveCamera(74, innerWidth / innerHeight, 0.05, 160);
+  scene.add(cam);
+  return cam;
+};
+const camera = makeCamera();
 
 const world = createWorld(scene);
 const fx = createEffects(scene);
@@ -44,23 +57,38 @@ const weapon = createWeaponSystem(camera);
 const bots = createBots(scene, world, random, fx, audio);
 const grenades = createGrenades(scene, world, fx, audio);
 const hud = createHud();
+const onLockChange = (locked) => {
+  if (staged) return;
+  if (locked) {
+    started = true;
+    hud.hideOverlay();
+    hud.showBuy(false);
+    buyOpen = false;
+    return;
+  }
+  if (matchStarted === false || rounds.state.phase === 'matchEnd') return;
+  if (player.state.alive) hud.showOverlay(started ? 'paused' : 'start');
+};
 const input = createInput(renderer.domElement, onLockChange);
 
 const raycaster = new THREE.Raycaster();
 raycaster.far = 120;
-const shootTargets = world.shootables.concat(bots.shootables);
+const shootTargets = [...world.shootables, ...bots.shootables];
 const direction = new THREE.Vector3();
 const tmpVec = new THREE.Vector3();
 const tmpVec2 = new THREE.Vector3();
 
 // The player's hitbox for bot raycasts: invisible to the eye, solid to a ray.
+const makeHitMesh = (geometry, extra) => {
+  const mesh = new THREE.Mesh(geometry, playerHitMat);
+  mesh.userData = { player: true, ...extra };
+  scene.add(mesh);
+  return mesh;
+};
 const playerHitMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
-const playerHitMesh = new THREE.Mesh(new THREE.BoxGeometry(0.68, 1.72, 0.68), playerHitMat);
-playerHitMesh.userData = { player: true };
-const playerHeadMesh = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 6), playerHitMat);
-playerHeadMesh.userData = { player: true, part: 'head' };
-scene.add(playerHitMesh, playerHeadMesh);
-const botRaycastTargets = shootTargets.concat([playerHitMesh, playerHeadMesh]);
+const playerHitMesh = makeHitMesh(new THREE.BoxGeometry(0.68, 1.72, 0.68), {});
+const playerHeadMesh = makeHitMesh(new THREE.SphereGeometry(0.2, 8, 6), { part: 'head' });
+const botRaycastTargets = [...shootTargets, playerHitMesh, playerHeadMesh];
 
 const playerEntity = { position: player.state.position, team: 'vipers', isPlayer: true };
 let noises = [];
@@ -81,265 +109,244 @@ let buyOpen = false;
 let owned = new Set(['pistol']);
 let matchStarted = false;
 
-function noise(x, z, radius) {
+const noise = (x, z, radius) => {
   noises.push({ x, z, radius });
-}
+};
 
-function syncCamera() {
+const syncCamera = () => {
   const body = player.state;
-  camera.position.set(body.position.x, body.position.y + body.eye, body.position.z);
+  const pos = body.position;
+  camera.position.set(pos.x, pos.y + body.eye, pos.z);
   camera.rotation.set(body.pitch, body.yaw, 0, 'YXZ');
-  const zoom = weapon.zoomFactor();
-  const targetFov = 74 / zoom;
-  if (Math.abs(camera.fov - targetFov) > 0.05) {
-    camera.fov += (targetFov - camera.fov) * 0.3;
+  const want = 74 / weapon.zoomFactor();
+  const off = camera.fov - want;
+  if (off > 0.05 || off < -0.05) {
+    camera.fov = want + off * 0.7;
     camera.updateProjectionMatrix();
   }
-  playerHitMesh.position.set(body.position.x, body.position.y + 0.86, body.position.z);
-  playerHeadMesh.position.set(body.position.x, body.position.y + body.eye, body.position.z);
-}
+  playerHitMesh.position.set(pos.x, pos.y + 0.86, pos.z);
+  playerHeadMesh.position.set(pos.x, pos.y + body.eye, pos.z);
+};
 
-function aimAt(point) {
+const aimAt = (point) => {
   const body = player.state;
   const dx = point.x - body.position.x;
   const dy = point.y - (body.position.y + body.eye);
   const dz = point.z - body.position.z;
-  const length = Math.hypot(dx, dy, dz) || 1;
+  const len = Math.hypot(dx, dy, dz) || 1;
+  body.pitch = Math.asin(THREE.MathUtils.clamp(dy / len, -1, 1));
   body.yaw = Math.atan2(-dx, -dz);
-  body.pitch = Math.asin(Math.max(-1, Math.min(1, dy / length)));
   syncCamera();
-}
+};
 
-function onKill(bot, attacker, headshot) {
-  const attackerName = attacker === playerEntity ? 'You' : attacker.name;
-  hud.killfeed(`${attackerName} ✕ ${bot.name}${headshot ? ' (headshot)' : ''}`);
-  if (attacker === playerEntity) {
-    rounds.addKillReward();
-    audio.kill();
-    hud.hitMarker(true, 220);
+const onKill = (bot, attacker, headshot) => {
+  const byPlayer = attacker === playerEntity;
+  hud.killfeed(`${byPlayer ? 'You' : attacker.name} ✕ ${bot.name}${headshot ? ' (headshot)' : ''}`);
+  if (byPlayer === false) {
+    checkRoundEnd();
+    return;
   }
+  rounds.addKillReward();
+  audio.kill();
+  hud.hitMarker(true, 220);
   // A kill by anyone can end the round.
   checkRoundEnd();
-}
+};
 
-function onPlayerDamage(amount, fromBot) {
-  if (!player.state.alive) return;
+const onPlayerDamage = (amount, fromBot) => {
+  if (player.state.alive === false) return;
   const died = player.damage(amount);
   hud.damageFlash();
   audio.hurt();
   hud.setHealth(player.state.health);
-  if (died) {
-    hud.showOverlay('dead');
-    if (document.pointerLockElement) document.exitPointerLock();
-    hud.killfeed(`${fromBot.name} ✕ You`);
-    checkRoundEnd();
-  }
-}
+  if (died === false) return;
+  hud.showOverlay('dead');
+  if (document.pointerLockElement) document.exitPointerLock();
+  hud.killfeed(`${fromBot.name} ✕ You`);
+  checkRoundEnd();
+};
 
-function onDefused() {
+const onDefused = () => {
   const result = rounds.endRound('jackals', 'defused');
   if (result) onRoundEnd(result);
-}
+};
 
-function pickDefuser() {
-  if (!rounds.state.bomb.planted) return null;
+const pickDefuser = () => {
+  if (rounds.state.bomb.planted === false) return null;
   const site = rounds.state.bomb.site === 'A' ? world.sites[0] : world.sites[1];
   let best = null;
   let bestDist = Infinity;
-  for (const bot of bots.bots) {
-    if (bot.team !== 'jackals' || !bot.alive) continue;
+  bots.bots.forEach((bot) => {
+    if (bot.team !== 'jackals' || bot.alive === false) return;
     const d = bot.position.distanceToSquared(site.center);
-    if (d < bestDist) { bestDist = d; best = bot; }
-  }
+    if (d >= bestDist) return;
+    bestDist = d;
+    best = bot;
+  });
   return best;
-}
+};
 
-function enemiesOf(bot) {
-  const list = [];
-  if (bot.team === 'jackals') {
-    for (const other of bots.bots) if (other.team === 'vipers' && other.alive) list.push(other);
-    if (player.state.alive) list.push(playerEntity);
-  } else {
-    for (const other of bots.bots) if (other.team === 'jackals' && other.alive) list.push(other);
-  }
-  return list;
-}
+const enemiesOf = (bot) => {
+  const foes = bots.bots.filter((other) => other.alive && other.team !== bot.team);
+  if (bot.team === 'jackals' && player.state.alive) foes.push(playerEntity);
+  return foes;
+};
 
-function onExplode(position, radius, damage) {
-  // Bots in the blast.
-  for (const bot of bots.bots) {
-    if (!bot.alive) continue;
+const onExplode = (position, radius, damage) => {
+  bots.bots.forEach((bot) => {
+    if (bot.alive === false) return;
     const d = bot.position.distanceTo(position);
-    if (d < radius) {
-      const amount = damage * (1 - (d / radius) * 0.75);
-      bots.damageBot(bot, amount, 'body', playerEntity, botCtx());
-    }
-  }
+    if (d >= radius) return;
+    bots.damageBot(bot, damage * (1 - (d / radius) * 0.75), 'body', playerEntity, botCtx());
+  });
   // The player in the blast.
-  if (player.state.alive) {
-    tmpVec.copy(player.state.position);
-    tmpVec.y += 1;
-    const d = tmpVec.distanceTo(position);
-    if (d < radius) onPlayerDamage(damage * (1 - (d / radius) * 0.75) * 0.6, { name: 'M-67' });
-  }
-}
+  if (player.state.alive === false) return;
+  tmpVec.copy(player.state.position);
+  tmpVec.y += 1;
+  const d = tmpVec.distanceTo(position);
+  if (d >= radius) return;
+  onPlayerDamage(damage * (1 - (d / radius) * 0.75) * 0.6, { name: 'M-67' });
+};
 
-function botCtx() {
-  return {
-    time: elapsed,
-    // The round number lets bots sharpen as the match goes on: a bot that has
-    // seen the player win rounds reacts a touch faster than in round 1.
-    round: rounds.state.round,
-    enemiesOf,
-    raycastTargets: botRaycastTargets,
-    noises,
-    noise,
-    bomb: rounds.state.bomb,
-    playerAlive: player.state.alive,
-    playerPos: player.state.position,
-    onKill,
-    onBotHit: () => {},
-    onPlayerDamage,
-    onDefused,
-    pickDefuser,
-  };
-}
+const botCtx = () => {
+  const ctx = {};
+  ctx.time = elapsed;
+  // The round number lets bots sharpen as the match goes on: a bot that has
+  // seen the player win rounds reacts a touch faster than in round 1.
+  ctx.round = rounds.state.round;
+  ctx.enemiesOf = enemiesOf;
+  ctx.raycastTargets = botRaycastTargets;
+  ctx.noises = noises;
+  ctx.noise = noise;
+  ctx.bomb = rounds.state.bomb;
+  ctx.playerAlive = player.state.alive;
+  ctx.playerPos = player.state.position;
+  ctx.onKill = onKill;
+  ctx.onBotHit = () => {};
+  ctx.onPlayerDamage = onPlayerDamage;
+  ctx.onDefused = onDefused;
+  ctx.pickDefuser = pickDefuser;
+  return ctx;
+};
 
-function checkRoundEnd() {
+const checkRoundEnd = () => {
   if (rounds.state.phase !== 'live') return;
   const vipersAlive = bots.aliveCount('vipers') + (player.state.alive ? 1 : 0);
   const jackalsAlive = bots.aliveCount('jackals');
-  if (rounds.state.bomb.planted) {
-    if (jackalsAlive === 0) {
-      // Spike still ticks: the round ends at detonation, handled by rounds.step.
-      return;
-    }
-    if (vipersAlive === 0) return; // Jackals must defuse before the timer ends.
-    return;
-  }
-  if (jackalsAlive === 0) {
-    const result = rounds.endRound('vipers', 'elimination');
+  // Spike still ticks: the round ends at detonation, handled by rounds.step,
+  // and the Jackals must defuse before the timer ends.
+  if (rounds.state.bomb.planted) return;
+  const end = (winner) => {
+    const result = rounds.endRound(winner, 'elimination');
     if (result) onRoundEnd(result);
-  } else if (vipersAlive === 0) {
-    const result = rounds.endRound('jackals', 'elimination');
-    if (result) onRoundEnd(result);
-  }
-}
+  };
+  if (jackalsAlive === 0) end('vipers');
+  else if (vipersAlive === 0) end('jackals');
+};
 
-function onRoundEnd(result) {
+const onRoundEnd = (result) => {
   const won = result.winner === 'vipers';
-  const reasonText = {
-    elimination: 'Enemy team eliminated',
-    detonation: 'Spike detonated',
-    defused: 'Spike defused',
-    time: 'Time expired — site held',
-  }[result.reason] || '';
+  let reasonText = '';
+  if (result.reason === 'elimination') reasonText = 'Enemy team eliminated';
+  else if (result.reason === 'detonation') reasonText = 'Spike detonated';
+  else if (result.reason === 'defused') reasonText = 'Spike defused';
+  else if (result.reason === 'time') reasonText = 'Time expired — site held';
   hud.banner(won ? 'ROUND WON' : 'ROUND LOST', `${reasonText}  ·  ${rounds.state.score.vipers} — ${rounds.state.score.jackals}`, 3600);
   if (won) audio.roundWin();
   else audio.roundLose();
-  if (rounds.state.phase === 'matchEnd') {
-    setTimeout(() => {
-      hud.showMatchEnd(rounds.state.score.vipers, rounds.state.score.jackals, won);
-      if (document.pointerLockElement) document.exitPointerLock();
-    }, 1500);
-  }
-}
+  if (rounds.state.phase !== 'matchEnd') return;
+  setTimeout(() => {
+    hud.showMatchEnd(rounds.state.score.vipers, rounds.state.score.jackals, won);
+    if (document.pointerLockElement) document.exitPointerLock();
+  }, 1500);
+};
 
-function respawnRound() {
+const respawnRound = () => {
   const plan = bots.spawnRound(rounds.state.round, null);
-  const spawn = world.spawns.vipers[1];
-  player.reset(spawn, Math.PI);
+  player.reset(world.spawns.vipers[1], Math.PI);
   weapon.equip(owned.has('rifle') ? 'rifle' : 'pistol');
   weapon.refill();
   weapon.state.grenades = owned.has('grenade') ? 1 : 0;
   grenades.reset();
   fx.reset();
   buyOpen = false;
-  hud.showBuy(false);
   hud.setHealth(100);
   hud.setMoney(rounds.state.money);
   hud.setScore(rounds.state.score.vipers, rounds.state.score.jackals);
   hud.setBomb(null, 0);
+  hud.showBuy(false);
   return plan;
-}
+};
 
-function startMatch() {
+const startMatch = () => {
   matchStarted = true;
-  owned = new Set(['pistol']);
+  owned.clear();
+  owned.add('pistol');
   rounds.startMatch();
-  respawnRound();
   hud.hideOverlay();
-  hud.banner(`ROUND 1`, 'Buy phase — press B for the buy menu', 3000);
-}
+  respawnRound();
+  hud.banner('ROUND 1', 'Buy phase — press B for the buy menu', 3000);
+};
 
-function restart() {
+const restart = () => {
   startMatch();
   input.requestLock();
-}
+};
 
 hud.onPlay(() => {
-  if (shot) return;
+  if (staged) return;
   audio.unlock();
-  if (!matchStarted || rounds.state.phase === 'matchEnd') restart();
-  else input.requestLock();
+  if (matchStarted && rounds.state.phase !== 'matchEnd') {
+    input.requestLock();
+    return;
+  }
+  restart();
 });
 
 hud.onBuy((item) => {
   buyItem(item);
 });
 
-function buyItem(item) {
+const buyItem = (item) => {
   const result = rounds.buy(item);
-  if (!result.ok) {
+  if (result.ok === false) {
     audio.denied();
     return;
   }
   audio.buy();
   hud.buyFlash(item);
-  if (item === 'grenade') {
-    owned.add('grenade');
-    weapon.state.grenades = 1;
-  } else {
+  if (item !== 'grenade') {
     owned.add(item);
     weapon.equip(item);
+  } else {
+    owned.add('grenade');
+    weapon.state.grenades = 1;
   }
   hud.setMoney(rounds.state.money);
-  hud.setAmmo(weapon.state.mag, weapon.state.reserve, weapon.def().name);
   hud.setGrenades(weapon.state.grenades);
-}
+  hud.setAmmo(weapon.state.mag, weapon.state.reserve, weapon.def().name);
+};
 
-function onLockChange(locked) {
-  if (shot) return;
-  if (locked) {
-    started = true;
-    hud.hideOverlay();
-    hud.showBuy(false);
-    buyOpen = false;
-  } else if (matchStarted && rounds.state.phase !== 'matchEnd') {
-    if (player.state.alive) hud.showOverlay(started ? 'paused' : 'start');
-  }
-}
-
-function shoot(spread) {
-  if (!weapon.takeRound()) {
+const shoot = (spread) => {
+  if (weapon.takeRound() === false) {
     audio.dryFire();
     return false;
   }
   camera.getWorldDirection(direction);
-  direction.x += (random() * 2 - 1) * spread;
-  direction.y += (random() * 2 - 1) * spread;
-  direction.z += (random() * 2 - 1) * spread;
+  for (const axis of ['x', 'y', 'z']) direction[axis] += (random() * 2 - 1) * spread;
   direction.normalize();
   scene.updateMatrixWorld(true);
   raycaster.set(camera.position, direction);
   const hit = raycaster.intersectObjects(shootTargets, false)[0];
   const muzzle = tmpVec2.copy(camera.position).addScaledVector(direction, 0.7);
-  if (hit) {
+  if (hit === undefined) {
+    tmpVec.copy(camera.position).addScaledVector(direction, 80);
+    fx.tracer(muzzle, tmpVec);
+  } else {
     fx.tracer(muzzle, hit.point);
     const ud = hit.object.userData;
     if (ud && ud.bot && ud.bot.alive) {
-      const dist = hit.distance;
-      const damage = weapon.damageAt(dist, ud.part);
+      const damage = weapon.damageAt(hit.distance, ud.part);
       bots.damageBot(ud.bot, damage, ud.part, playerEntity, botCtx());
       hud.hitMarker(ud.bot.health <= 0, 120);
       audio.hit();
@@ -347,9 +354,6 @@ function shoot(spread) {
     } else {
       fx.impact(hit.point);
     }
-  } else {
-    tmpVec.copy(camera.position).addScaledVector(direction, 80);
-    fx.tracer(muzzle, tmpVec);
   }
   weapon.pullTrigger();
   const recoil = weapon.recoil();
@@ -358,158 +362,275 @@ function shoot(spread) {
   noise(player.state.position.x, player.state.position.z, 26);
   hud.setAmmo(weapon.state.mag, weapon.state.reserve, weapon.def().name);
   return true;
-}
+};
 
-function step(dt) {
-  elapsed += dt;
+const advanceRound = (dt) => {
   const roundEvent = rounds.step(dt);
-  if (roundEvent && roundEvent.next) {
+  if (roundEvent === null || roundEvent === undefined) return;
+  if (roundEvent.next) {
     respawnRound();
     hud.banner(`ROUND ${rounds.state.round}`, 'Buy phase — press B for the buy menu', 3000);
-  } else if (roundEvent && roundEvent.winner) {
-    onRoundEnd(roundEvent);
-  }
+  } else if (roundEvent.winner) onRoundEnd(roundEvent);
+};
 
+const updateBomb = () => {
+  if (rounds.state.bomb.planted === false) return;
   // Bomb beeps accelerate as the timer runs down.
-  if (rounds.state.bomb.planted) {
-    const interval = 0.25 + (rounds.state.bomb.timer / 35) * 0.75;
-    if (elapsed - lastBeep > interval) {
-      lastBeep = elapsed;
-      audio.beep(rounds.state.bomb.timer < 10);
-    }
-    hud.setBomb(`SPIKE — ${Math.ceil(rounds.state.bomb.timer)}s`, 1 - rounds.state.bomb.timer / 35);
+  const interval = 0.25 + rounds.state.bomb.timer * (0.75 / 35);
+  if (lastBeep + interval < elapsed) {
+    lastBeep = elapsed;
+    audio.beep(rounds.state.bomb.timer < 10);
   }
+  hud.setBomb(`SPIKE — ${Math.ceil(rounds.state.bomb.timer)}s`, 1 - rounds.state.bomb.timer / 35);
+};
 
-  if (rounds.state.phase === 'live' || rounds.state.phase === 'freeze') {
-    player.step(dt, input.state.keys);
-    weapon.step(dt);
-    // Bots hold still during the freeze (buy) phase; they fight once the round is live.
-    if (rounds.state.phase === 'live') bots.step(dt, botCtx());
-    grenades.step(dt, { onExplode });
-    fx.step(dt);
-  }
+const updateActors = (dt) => {
+  const phase = rounds.state.phase;
+  if (phase !== 'live' && phase !== 'freeze') return;
+  player.step(dt, input.state.keys);
+  weapon.step(dt);
+  // Bots hold still during the freeze (buy) phase; they fight once the round is live.
+  if (phase === 'live') bots.step(dt, botCtx());
+  grenades.step(dt, { onExplode });
+  fx.step(dt);
+};
 
-  // Plant channel: hold E inside a site while the round is live.
+const updatePlant = (dt) => {
   const body = player.state;
-  const inSite = rounds.state.phase === 'live' && !rounds.state.bomb.planted && body.alive
-    ? world.sites.find((s) => (body.position.x - s.center.x) ** 2 + (body.position.z - s.center.z) ** 2 < s.radius * s.radius)
+  const planting = rounds.state.phase === 'live' && rounds.state.bomb.planted === false && body.alive;
+  const inSite = planting
+    ? world.sites.find((s) => (body.position.x - s.center.x) * (body.position.x - s.center.x) + (body.position.z - s.center.z) * (body.position.z - s.center.z) < s.radius * s.radius)
     : null;
-  if (inSite && input.pressed('KeyE')) {
+  if (inSite !== null && input.pressed('KeyE')) {
     rounds.state.bomb.plantProgress += dt;
     hud.setBomb(`PLANTING SPIKE — ${inSite.id}`, rounds.state.bomb.plantProgress / PLANT_TIME);
-    if (rounds.state.bomb.plantProgress >= PLANT_TIME) {
-      rounds.plant(inSite.id, inSite.center);
-      audio.plant();
-      hud.banner('SPIKE PLANTED', `Site ${inSite.id} — defend it for ${35} seconds`, 3000);
-      hud.killfeed(`You planted the spike at ${inSite.id}`);
-      hud.setMoney(rounds.state.money);
-    }
-  } else {
-    rounds.state.bomb.plantProgress = Math.max(0, rounds.state.bomb.plantProgress - dt * 2);
-    if (!rounds.state.bomb.planted) hud.setBomb(null, 0);
+    if (rounds.state.bomb.plantProgress < PLANT_TIME) return;
+    rounds.plant(inSite.id, inSite.center);
+    audio.plant();
+    hud.banner('SPIKE PLANTED', `Site ${inSite.id} — defend it for ${35} seconds`, 3000);
+    hud.killfeed(`You planted the spike at ${inSite.id}`);
+    hud.setMoney(rounds.state.money);
+    return;
   }
+  rounds.state.bomb.plantProgress = Math.max(0, rounds.state.bomb.plantProgress - dt * 2);
+  if (rounds.state.bomb.planted === false) hud.setBomb(null, 0);
+};
 
+const step = (dt) => {
+  elapsed += dt;
+  advanceRound(dt);
+  updateBomb();
+  updateActors(dt);
+  updatePlant(dt);
   noises = [];
-}
+};
 
-function handleBuyAndSwitch() {
+const handleBuyAndSwitch = () => {
   if (buyOpen) {
     // Buy keys are edge-triggered: holding 1 must not buy the rifle sixty times.
-    for (const entry of BUY_ITEMS) {
+    BUY_ITEMS.forEach((entry) => {
       const down = input.pressed(entry.key);
-      if (down && !prevBuyKeys.has(entry.key)) buyItem(entry.item);
+      if (down && prevBuyKeys.has(entry.key) === false) buyItem(entry.item);
       if (down) prevBuyKeys.add(entry.key);
       else prevBuyKeys.delete(entry.key);
-    }
+    });
     return;
   }
   // Weapon switch: 1 pistol, 2 rifle, 3 SMG, 4 DMR — only what is owned.
-  const switchKeys = [['Digit1', 'pistol'], ['Digit2', 'rifle'], ['Digit3', 'smg'], ['Digit4', 'dmr']];
-  for (const [code, kind] of switchKeys) {
-    if (input.pressed(code) && owned.has(kind) && weapon.state.kind !== kind) {
-      weapon.equip(kind);
-      hud.setAmmo(weapon.state.mag, weapon.state.reserve, weapon.def().name);
-      audio.buy();
-    }
-  }
-}
+  [['Digit1', 'pistol'], ['Digit2', 'rifle'], ['Digit3', 'smg'], ['Digit4', 'dmr']].forEach(([code, kind]) => {
+    if (input.pressed(code) === false) return;
+    if (owned.has(kind) === false) return;
+    if (weapon.state.kind === kind) return;
+    weapon.equip(kind);
+    hud.setAmmo(weapon.state.mag, weapon.state.reserve, weapon.def().name);
+    audio.buy();
+  });
+};
 
-function frame(now) {
+const pollInput = () => {
+  const look = input.takeLook();
+  const zoomed = weapon.setZoomed(input.state.aiming && player.state.alive);
+  player.look(look.x * (zoomed ? 0.45 : 1), look.y * (zoomed ? 0.45 : 1));
+  tryFire();
+  tryReload();
+  tryGrenade();
+  tryBuyToggle();
+  handleBuyAndSwitch();
+  tryMute();
+};
+
+const tryFire = () => {
+  const def = weapon.def();
+  const firing = input.state.firing && player.state.alive && buyOpen === false && rounds.state.phase !== 'freeze' && rounds.state.phase !== 'lobby';
+  if (firing === false || weapon.ready() === false) {
+    prevFiring = input.state.firing;
+    return;
+  }
+  if (def.auto || prevFiring === false) shoot(staged ? 0 : weapon.spread(player.groundSpeed()));
+  prevFiring = input.state.firing;
+};
+
+const tryReload = () => {
+  const pressed = input.pressed('KeyR');
+  if (pressed && prevReload === false && weapon.reload()) audio.reload();
+  prevReload = pressed;
+};
+
+const tryGrenade = () => {
+  const pressed = input.pressed('KeyG');
+  const canThrow = pressed && prevGrenade === false && weapon.state.grenades > 0 && player.state.alive && rounds.state.phase === 'live';
+  if (canThrow) {
+    weapon.state.grenades -= 1;
+    hud.setGrenades(weapon.state.grenades);
+    camera.getWorldDirection(direction);
+    tmpVec.copy(camera.position).addScaledVector(direction, 0.5);
+    grenades.throwGrenade(tmpVec, direction);
+  }
+  prevGrenade = pressed;
+};
+
+const tryBuyToggle = () => {
+  const pressed = input.pressed('KeyB');
+  if (pressed && prevBuy === false && rounds.canBuy() && player.state.alive) {
+    buyOpen = buyOpen === false;
+    hud.showBuy(buyOpen);
+    if (buyOpen) {
+      if (document.pointerLockElement) document.exitPointerLock();
+    } else input.requestLock();
+  }
+  prevBuy = pressed;
+};
+
+const tryMute = () => {
+  const pressed = input.pressed('KeyM');
+  if (pressed && prevMute === false) audio.toggleMute();
+  prevMute = pressed;
+};
+
+const advanceSim = (dt) => {
+  accumulator += dt;
+  let steps = 0;
+  while (accumulator >= STEP && steps < 5) {
+    step(STEP);
+    accumulator = accumulator - STEP;
+    steps++;
+  }
+  if (accumulator > STEP * 5) accumulator = 0;
+};
+
+const refreshHud = () => {
+  hud.setHealth(player.state.health);
+  hud.setMoney(rounds.state.money);
+  hud.setAmmo(weapon.state.mag, weapon.state.reserve, weapon.def().name);
+  // The timer runs in the freeze (buy) phase and while the round is live;
+  // every other phase shows 0.
+  const phase = rounds.state.phase;
+  const timer = phase === 'freeze' || phase === 'live' ? rounds.state.phaseTime : 0;
+  hud.setTimer(timer);
+  hud.setAlive(bots.aliveCount('vipers') + (player.state.alive ? 1 : 0), bots.aliveCount('jackals'));
+  hud.setScore(rounds.state.score.vipers, rounds.state.score.jackals);
+  hud.setCrosshairSpread(weapon.spread(player.groundSpeed()) * 900 + 4);
+  syncCamera();
+};
+
+const frame = (now) => {
   requestAnimationFrame(frame);
   const dt = Math.min((now - lastTime) / 1000, 0.1);
   lastTime = now;
-  if (!frozen) {
-    const look = input.takeLook();
-    const zoomed = weapon.setZoomed(input.state.aiming && player.state.alive);
-    if (zoomed) player.look(look.x * 0.45, look.y * 0.45);
-    else player.look(look.x, look.y);
-
-    const firing = input.state.firing && player.state.alive && !buyOpen && rounds.state.phase !== 'freeze' && rounds.state.phase !== 'lobby';
-    const def = weapon.def();
-    if (firing && weapon.ready()) {
-      if (def.auto || !prevFiring) shoot(shot ? 0 : weapon.spread(player.groundSpeed()));
-    }
-    prevFiring = input.state.firing;
-
-    const reloadPressed = input.pressed('KeyR');
-    if (reloadPressed && !prevReload && weapon.reload()) audio.reload();
-    prevReload = reloadPressed;
-
-    const grenadePressed = input.pressed('KeyG');
-    if (grenadePressed && !prevGrenade && weapon.state.grenades > 0 && player.state.alive && rounds.state.phase === 'live') {
-      weapon.state.grenades -= 1;
-      hud.setGrenades(weapon.state.grenades);
-      camera.getWorldDirection(direction);
-      tmpVec.copy(camera.position).addScaledVector(direction, 0.5);
-      grenades.throwGrenade(tmpVec, direction);
-    }
-    prevGrenade = grenadePressed;
-
-    const buyPressed = input.pressed('KeyB');
-    if (buyPressed && !prevBuy && rounds.canBuy() && player.state.alive) {
-      buyOpen = !buyOpen;
-      hud.showBuy(buyOpen);
-      if (buyOpen && document.pointerLockElement) document.exitPointerLock();
-      if (!buyOpen) input.requestLock();
-    }
-    prevBuy = buyPressed;
-
-    handleBuyAndSwitch();
-
-    const mutePressed = input.pressed('KeyM');
-    if (mutePressed && !prevMute) audio.toggleMute();
-    prevMute = mutePressed;
-
-    accumulator += dt;
-    let steps = 0;
-    while (accumulator >= FIXED_STEP && steps < 5) {
-      step(FIXED_STEP);
-      accumulator -= FIXED_STEP;
-      steps += 1;
-    }
-    if (accumulator > FIXED_STEP * 5) accumulator = 0;
-
-    // HUD, every frame.
-    hud.setAmmo(weapon.state.mag, weapon.state.reserve, weapon.def().name);
-    hud.setHealth(player.state.health);
-    hud.setMoney(rounds.state.money);
-    // The timer runs in the freeze (buy) phase and while the round is live;
-    // every other phase shows 0.
-    const timer = (rounds.state.phase === 'freeze' || rounds.state.phase === 'live') ? rounds.state.phaseTime : 0;
-    hud.setTimer(timer);
-    hud.setScore(rounds.state.score.vipers, rounds.state.score.jackals);
-    hud.setAlive(bots.aliveCount('vipers') + (player.state.alive ? 1 : 0), bots.aliveCount('jackals'));
-    hud.setCrosshairSpread(4 + weapon.spread(player.groundSpeed()) * 900);
-    syncCamera();
+  if (frozen === false) {
+    pollInput();
+    advanceSim(dt);
+    refreshHud();
   }
   renderer.render(scene, camera);
-}
+};
 
-function settle(steps) {
-  for (let index = 0; index < steps; index += 1) step(FIXED_STEP);
-}
+const settle = (steps) => {
+  let index = 0;
+  while (index < steps) {
+    step(STEP);
+    index += 1;
+  }
+};
 
-function runShot(name) {
+const stageStart = () => {
+  const body = player.state;
+  // T spawn, looking down mid toward A: two Viper bots ahead, dusk light.
+  body.position.set(0, 0, 15);
+  body.yaw = 0.35;
+  body.pitch = 0.01;
+  const vipers = bots.bots.filter((b) => b.team === 'vipers');
+  vipers[0].yaw = 0.2;
+  vipers[0].position.set(-2, 0, 9);
+  vipers[1].yaw = -0.3;
+  vipers[1].position.set(3, 0, 7);
+  settle(30);
+  syncCamera();
+};
+
+const stagePlay = () => {
+  const body = player.state;
+  // Mid firefight: a Jackal in the open mid lane, tracer in flight, hitmarker up.
+  body.position.set(0, 0, 8);
+  body.yaw = 0;
+  body.pitch = 0;
+  const jackal = bots.bots.find((b) => b.team === 'jackals');
+  jackal.yaw = Math.PI;
+  jackal.position.set(0.5, 0, -1.5);
+  jackal.group.position.copy(jackal.position);
+  settle(10);
+  aimAt(new THREE.Vector3(0.5, 1.2, -1.5));
+  shoot(0);
+  hud.hitMarker(false, 4000);
+  settle(6);
+  syncCamera();
+};
+
+const stageSite = () => {
+  const body = player.state;
+  // A site: the spike is planted, a Viper holds the angle, the site ring glows.
+  body.position.set(-13, 0, -4);
+  body.yaw = 0.7;
+  body.pitch = 0.02;
+  rounds.plant('A', world.sites[0].center);
+  const viper = bots.bots.find((b) => b.team === 'vipers');
+  viper.yaw = 0.9;
+  viper.position.set(-15, 0, -6);
+  viper.group.position.copy(viper.position);
+  const jackal = bots.bots.find((b) => b.team === 'jackals');
+  jackal.yaw = 2.6;
+  jackal.position.set(-21, 0, -13);
+  jackal.group.position.copy(jackal.position);
+  settle(20);
+  syncCamera();
+};
+
+const stageEnd = () => {
+  const body = player.state;
+  // Round won: banner up, two fallen Jackals in the lane, score 1-0.
+  body.position.set(1.5, 0, 6);
+  body.yaw = 0;
+  body.pitch = 0;
+  const fallen = bots.bots.filter((b) => b.team === 'jackals');
+  fallen[0].alive = false;
+  fallen[0].state = 'dead';
+  fallen[0].position.set(-0.5, 0, 1);
+  fallen[0].group.position.copy(fallen[0].position);
+  fallen[0].group.rotation.set(0, 0.5, 1.2);
+  fallen[1].alive = false;
+  fallen[1].state = 'dead';
+  fallen[1].position.set(2.5, 0, 0);
+  fallen[1].group.position.copy(fallen[1].position);
+  fallen[1].group.rotation.set(0, -0.8, -1.2);
+  settle(10);
+  aimAt(new THREE.Vector3(-0.5, 0.3, 1));
+  rounds.state.score.vipers = 1;
+  hud.setScore(1, 0);
+  hud.banner('ROUND WON', 'Enemy team eliminated  ·  1 — 0', 60000);
+  syncCamera();
+};
+
+const runShot = (name) => {
   hud.hideOverlay();
   hud.showBuy(false);
   startMatch();
@@ -519,108 +640,44 @@ function runShot(name) {
   owned.add('rifle');
   weapon.equip('rifle');
   weapon.refill();
-  const body = player.state;
-  if (name === 'start') {
-    // T spawn, looking down mid toward A: two Viper bots ahead, dusk light.
-    body.position.set(0, 0, 15);
-    body.yaw = 0.35;
-    body.pitch = 0.01;
-    const vipers = bots.bots.filter((b) => b.team === 'vipers');
-    vipers[0].position.set(-2, 0, 9);
-    vipers[0].yaw = 0.2;
-    vipers[1].position.set(3, 0, 7);
-    vipers[1].yaw = -0.3;
-    settle(30);
-    syncCamera();
-  } else if (name === 'play') {
-    // Mid firefight: a Jackal in the open mid lane, tracer in flight, hitmarker up.
-    body.position.set(0, 0, 8);
-    body.yaw = 0;
-    body.pitch = 0;
-    const jackal = bots.bots.find((b) => b.team === 'jackals');
-    jackal.position.set(0.5, 0, -1.5);
-    jackal.yaw = Math.PI;
-    jackal.group.position.copy(jackal.position);
-    settle(10);
-    aimAt(new THREE.Vector3(0.5, 1.2, -1.5));
-    shoot(0);
-    hud.hitMarker(false, 4000);
-    settle(6);
-    syncCamera();
-  } else if (name === 'site') {
-    // A site: the spike is planted, a Viper holds the angle, the site ring glows.
-    body.position.set(-13, 0, -4);
-    body.yaw = 0.7;
-    body.pitch = 0.02;
-    rounds.plant('A', world.sites[0].center);
-    const viper = bots.bots.find((b) => b.team === 'vipers');
-    viper.position.set(-15, 0, -6);
-    viper.yaw = 0.9;
-    viper.group.position.copy(viper.position);
-    const jackal = bots.bots.find((b) => b.team === 'jackals');
-    jackal.position.set(-21, 0, -13);
-    jackal.yaw = 2.6;
-    jackal.group.position.copy(jackal.position);
-    settle(20);
-    syncCamera();
-  } else {
-    // Round won: banner up, two fallen Jackals in the lane, score 1-0.
-    body.position.set(1.5, 0, 6);
-    body.yaw = 0;
-    body.pitch = 0;
-    const fallen = bots.bots.filter((b) => b.team === 'jackals');
-    fallen[0].alive = false;
-    fallen[0].state = 'dead';
-    fallen[0].position.set(-0.5, 0, 1);
-    fallen[0].group.position.copy(fallen[0].position);
-    fallen[0].group.rotation.set(0, 0.5, 1.2);
-    fallen[1].alive = false;
-    fallen[1].state = 'dead';
-    fallen[1].position.set(2.5, 0, 0);
-    fallen[1].group.position.copy(fallen[1].position);
-    fallen[1].group.rotation.set(0, -0.8, -1.2);
-    settle(10);
-    aimAt(new THREE.Vector3(-0.5, 0.3, 1));
-    rounds.state.score.vipers = 1;
-    hud.setScore(1, 0);
-    hud.banner('ROUND WON', 'Enemy team eliminated  ·  1 — 0', 60000);
-    syncCamera();
-  }
-  hud.setAmmo(weapon.state.mag, weapon.state.reserve, weapon.def().name);
+  const stages = { start: stageStart, play: stagePlay, site: stageSite, end: stageEnd };
+  const stage = stages[name] || stages.end;
+  stage();
+  hud.setScore(rounds.state.score.vipers, rounds.state.score.jackals);
   hud.setHealth(player.state.health);
   hud.setMoney(rounds.state.money);
+  hud.setAmmo(weapon.state.mag, weapon.state.reserve, weapon.def().name);
   hud.setTimer(rounds.state.phaseTime);
-  hud.setScore(rounds.state.score.vipers, rounds.state.score.jackals);
   hud.setAlive(bots.aliveCount('vipers') + 1, bots.aliveCount('jackals'));
   paintTwiceThenReady();
-}
+};
 
-function paintTwiceThenReady() {
+const paintTwiceThenReady = () => {
   let painted = 0;
-  function paint() {
+  const paint = () => {
     requestAnimationFrame(paint);
     syncCamera();
     renderer.render(scene, camera);
-    painted += 1;
-    if (painted === 2) {
-      window.__shotReady = true;
+    painted++;
+    if (painted >= 2) {
       frozen = true;
+      window.__shotReady = true;
     }
-  }
+  };
   requestAnimationFrame(paint);
-}
+};
 
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.aspect = innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(innerWidth, innerHeight);
 });
 
 syncCamera();
-hud.setAmmo(weapon.state.mag, weapon.state.reserve, weapon.def().name);
 hud.setHealth(100);
+hud.setAmmo(weapon.state.mag, weapon.state.reserve, weapon.def().name);
 hud.setMoney(rounds.state.money);
 hud.setScore(0, 0);
 hud.setAlive(5, 5);
-if (shot) runShot(shot);
+if (staged) runShot(staged);
 else requestAnimationFrame(frame);
